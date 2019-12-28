@@ -1,6 +1,5 @@
 define(['app'], function (app) {
-	app.controller('SetupController', ['$scope', '$rootScope', '$window', '$location', '$http', '$interval', function ($scope, $rootScope, $window, $location, $http, $interval) {
-
+	app.controller('SetupController', ['$scope', '$rootScope', '$window', '$location', '$http', '$interval', 'md5', function ($scope, $rootScope, $window, $location, $http, $interval, md5) {
 		googleMapsCallback = function () {
 			$("#dialog-findlatlong").dialog("open");
 		};
@@ -77,14 +76,6 @@ define(['app'], function (app) {
 						return;
 					}
 					extraparams = "ProwlAPI=" + ProwlAPI;
-					break;
-				case "nma":
-					var NMAAPI = encodeURIComponent($("#nmatable #NMAAPI").val());
-					if (NMAAPI == "") {
-						ShowNotify($.t('Please enter the API key!...'), 3500, true);
-						return;
-					}
-					extraparams = "NMAAPI=" + NMAAPI;
 					break;
 				case "pushbullet":
 					var PushbulletAPI = encodeURIComponent($("#pushbullettable #PushbulletAPI").val());
@@ -285,12 +276,6 @@ define(['app'], function (app) {
 					if (typeof data.ProwlAPI != 'undefined') {
 						$("#prowltable #ProwlAPI").val(data.ProwlAPI);
 					}
-					if (typeof data.NMAEnabled != 'undefined') {
-						$("#nmatable #NMAEnabled").prop('checked', data.NMAEnabled == 1);
-					}
-					if (typeof data.NMAAPI != 'undefined') {
-						$("#nmatable #NMAAPI").val(data.NMAAPI);
-					}
 					if (typeof data.PushbulletEnabled != 'undefined') {
 						$("#pushbullettable #PushbulletEnabled").prop('checked', data.PushbulletEnabled == 1);
 					}
@@ -419,17 +404,19 @@ define(['app'], function (app) {
 						$("#shortlogtable #comboshortloginterval").val(data.ShortLogInterval);
 					}
 					if (typeof data.DashboardType != 'undefined') {
-						$("#dashmodetable #combosdashtype").val(data.DashboardType);
+						$("#settingscontent #combosdashtype").val(data.DashboardType);
+					}
+					if (typeof data.AllowWidgetOrdering != 'undefined') {
+						$("#settingscontent #AllowWidgetOrdering").prop('checked', data.AllowWidgetOrdering == 1);
 					}
 					if (typeof data.MobileType != 'undefined') {
-						$("#mobilemodetable #combosmobiletype").val(data.MobileType);
+						$("#settingscontent #combosmobiletype").val(data.MobileType);
 					}
 					if (typeof data.WebUserName != 'undefined') {
+						$scope.OldAdminUser=data.WebUserName;
 						$("#webtable #WebUserName").val(data.WebUserName);
 					}
-					if (typeof data.WebPassword != 'undefined') {
-						$("#webtable #WebPassword").val(data.WebPassword);
-					}
+					$("#webtable #WebPassword").val(md5.createHash("bogus"));
 					if (typeof data.SecPassword != 'undefined') {
 						$("#sectable #SecPassword").val(data.SecPassword);
 					}
@@ -605,14 +592,17 @@ define(['app'], function (app) {
 					if (typeof data.EnableEventScriptSystem != 'undefined') {
 						$("#eventsystemtable #EnableEventScriptSystem").prop('checked', data.EnableEventScriptSystem == 1);
 					}
-                    if (typeof data.DisableDzVentsSystem != 'undefined') {
-                        $("#DisableDzVentsSystem").prop('checked', data.DisableDzVentsSystem == 0);
-                    }
-                    if (typeof data.DzVentsLogLevel != 'undefined') {
-                        $("#comboDzVentsLogLevel").val(data.DzVentsLogLevel);
-                    }
+					if (typeof data.DisableDzVentsSystem != 'undefined') {
+						$("#DisableDzVentsSystem").prop('checked', data.DisableDzVentsSystem == 0);
+					}
+					if (typeof data.DzVentsLogLevel != 'undefined') {
+						$("#comboDzVentsLogLevel").val(data.DzVentsLogLevel);
+					}
 					if (typeof data.LogEventScriptTrigger != 'undefined') {
 						$("#eventsystemtable #LogEventScriptTrigger").prop('checked', data.LogEventScriptTrigger == 1);
+					}
+					if (typeof data.EventSystemLogFullURL != 'undefined') {
+						$("#eventsystemtable #EventSystemLogFullURL").prop('checked', data.EventSystemLogFullURL == 1);
 					}
 
 					if (typeof data.FloorplanPopupDelay != 'undefined') {
@@ -642,22 +632,8 @@ define(['app'], function (app) {
 					if (typeof data.FloorplanInactiveOpacity != 'undefined') {
 						$("#floorplancolourtable #FloorplanInactiveOpacity").val(data.FloorplanInactiveOpacity);
 					}
-
-					if (typeof data.AllowWidgetOrdering != 'undefined') {
-						$("#dashmodetable #AllowWidgetOrdering").prop('checked', data.AllowWidgetOrdering == 1);
-					}
 					if (typeof data.SecOnDelay != 'undefined') {
 						$("#sectable #SecOnDelay").val(data.SecOnDelay);
-					}
-					if (typeof data.LogLevel != 'undefined') {
-						$("#LogDebug #LogFilterTable #LogLevel").val(data.LogLevel);
-						$("#LogDebug").show();
-					}
-					if (typeof data.LogFilter != 'undefined') {
-						$("#LogDebug #LogFilterTable #LogFilter").val(data.LogFilter);
-					}
-					if (typeof data.LogFileName != 'undefined') {
-						$("#LogDebug #LogFilterTable #LogFileName").val(data.LogFileName);
 					}
 					if (typeof data.cloudenabled != 'undefined') {
 						if (!data.cloudenabled) {
@@ -687,6 +663,9 @@ define(['app'], function (app) {
 					if (typeof data.IFTTTAPI != 'undefined') {
 						$("#ifttttable #IFTTTAPI").val(atob(data.IFTTTAPI));
 					}
+					if (typeof data.WebRemoteProxyIPs != 'undefined') {
+						$("#webproxytable #WebRemoteProxyIPs").val(data.WebRemoteProxyIPs);
+					}
 				}
 			});
 		}
@@ -701,6 +680,23 @@ define(['app'], function (app) {
 				ShowNotify($.t('Invalid Location Settings...'), 2000, true);
 				return;
 			}
+			
+			var adminuser = $("#webtable #WebUserName").val();
+			var adminpwd = $("#webtable #WebPassword").val();
+			if (adminpwd == md5.createHash("bogus")) {
+				$("#webtable #WebPassword").val("");
+				adminpwd = "";
+			}
+			if ((adminuser!="")&&($scope.OldAdminUser!=adminuser)) {
+				if (adminpwd=="") {
+					ShowNotify($.t('Please enter a Admin password!'), 2000, true);
+					return;
+				}
+			}
+			if (adminpwd!="") {
+				$("#webtable #WebPassword").val(md5.createHash(adminpwd));
+			}
+						
 
 			var secpanel = $("#sectable #SecPassword").val();
 			var switchprotection = $("#protectiontable #ProtectionPassword").val();
@@ -739,11 +735,22 @@ define(['app'], function (app) {
 				}
 			}
 
-			$.post("storesettings.webem", $("#settings").serialize(), function (data) {
-				$scope.$apply(function () {
-					$window.location = '/#Dashboard';
-					$window.location.reload();
-				});
+			$http.post('storesettings', new FormData(document.querySelector("#settings")), {
+				transformRequest: angular.identity,
+				headers: { 'Content-Type': undefined }
+			}).then(function successCallback(response) {
+			    var data = response.data;
+			    if (data.status != "OK") {
+			        HideNotify();
+					ShowNotify($.t("Problem saving settings!"), 2000, true);
+					return;
+			    }
+				$window.location = '/#Dashboard';
+				$window.location.reload();
+			}, function errorCallback(response) {
+			    HideNotify();
+				ShowNotify($.t("Problem saving settings!"), 2000, true);
+				return;
 			});
 		}
 
@@ -818,17 +825,39 @@ define(['app'], function (app) {
 							bootbox.alert($.t('Please enter a Address to search for!...'), 3500, true);
 							return false;
 						}
-						geocoder = new google.maps.Geocoder();
-						geocoder.geocode({ 'address': address }, function (results, status) {
-							if (status == google.maps.GeocoderStatus.OK) {
-								$('#dialog-findlatlong #latitude').val(results[0].geometry.location.lat().toFixed(6));
-								$('#dialog-findlatlong #longitude').val(results[0].geometry.location.lng().toFixed(6));
-							} else {
-								bootbox.alert($.t('Geocode was not successful for the following reason') + ': ' + status);
+						var url = "https://www.mapquestapi.com/geocoding/v1/address?key=XN5Eyt9GjLaRPG6T2if7VtUueRLckR8b&inFormat=kvp&outFormat=json&thumbMaps=false&location=" + address;
+						$http({
+							url: url,
+							async: true,
+							dataType: 'json'
+						}).then(function successCallback(response) {
+							var data = response.data;
+							var bIsOK = false;
+							if(data.hasOwnProperty('results')) {
+								if (data['results'][0]['locations'].length > 0) {
+									$('#dialog-findlatlong #latitude').val(data['results'][0]['locations'][0]['displayLatLng']['lat']);
+									$('#dialog-findlatlong #longitude').val(data['results'][0]['locations'][0]['displayLatLng']['lng']);//.toFixed(6)
+									bIsOK = true;
+								}
+							} 
+							if (!bIsOk) {
+								bootbox.alert($.t('Geocode was not successful for the following reason') + ': Invalid/No data returned!');
 							}
+						}, function errorCallback(response) {
+							bootbox.alert($.t('Geocode was not successful for the following reason') + ': ' + response.statusText);
 						});
 						return false;
 					});
+					if ('geolocation' in navigator) {
+						$('#geodetect').click(function () {
+							navigator.geolocation.getCurrentPosition(function (location) {
+								$('#dialog-findlatlong #latitude').val(location.coords.latitude);
+								$('#dialog-findlatlong #longitude').val(location.coords.longitude);
+							});
+						});
+					} else {
+						$('#georow').hide();
+					}
 				},
 				close: function () {
 					$(this).dialog("close");

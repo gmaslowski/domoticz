@@ -1,23 +1,24 @@
-#include "stdafx.h"
+#include "stdafx.h" 
 #include "mainworker.h"
 #include "SQLHelper.h"
 #include "localtime_r.h"
 #include "../hardware/hardwaretypes.h"
+#include "../main/Logger.h"
 #include "../main/WebServerHelper.h"
 #include "dzVents.h"
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
+#include "../webserver/Base64.h"
 
-extern std::string szUserDataFolder, szWebRoot;
+extern std::string szUserDataFolder, szWebRoot, szStartupFolder, szAppVersion;
 extern http::server::CWebServerHelper m_webservers;
-static std::string m_printprefix;
 
 CdzVents CdzVents::m_dzvents;
 
-CdzVents::CdzVents(void)
+CdzVents::CdzVents(void) :
+	m_version("2.5.4")
 {
-	m_version = "2.4.1";
-	m_printprefix = "dzVents";
+	m_bdzVentsExist = false;
 }
 
 CdzVents::~CdzVents(void)
@@ -40,7 +41,7 @@ void CdzVents::EvaluateDzVents(lua_State *lua_state, const std::vector<CEventSys
 	bool reasonURL = false;
 	bool reasonSecurity = false;
 	std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-	for (itt = items.begin(); itt != items.end(); itt++)
+	for (itt = items.begin(); itt != items.end(); ++itt)
 	{
 		if (itt->reason == m_mainworker.m_eventsystem.REASON_URL)
 			reasonURL = true;
@@ -68,7 +69,7 @@ void CdzVents::ProcessSecurity(lua_State *lua_state, const std::vector<CEventSys
 	std::string secstatusw = "";
 	lua_createtable(lua_state, 0, 0);
 	std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-	for (itt = items.begin(); itt != items.end(); itt++)
+	for (itt = items.begin(); itt != items.end(); ++itt)
 	{
 		if (itt->reason == m_mainworker.m_eventsystem.REASON_SECURITY)
 		{
@@ -80,7 +81,7 @@ void CdzVents::ProcessSecurity(lua_State *lua_state, const std::vector<CEventSys
 			else
 				secstatusw = "Disarmed";
 
-			lua_pushnumber(lua_state, (lua_Number)index);
+			lua_pushinteger(lua_state, index);
 			lua_pushstring(lua_state, secstatusw.c_str());
 			lua_rawset(lua_state, -3);
 			index++;
@@ -89,42 +90,72 @@ void CdzVents::ProcessSecurity(lua_State *lua_state, const std::vector<CEventSys
 	lua_setglobal(lua_state, "securityupdates");
 }
 
-void CdzVents::ProcessHttpResponse(lua_State *lua_state, const std::vector<CEventSystem::_tEventQueue> &items)
+void CdzVents::ProcessHttpResponse(lua_State* lua_state, const std::vector<CEventSystem::_tEventQueue>& items)
 {
 	int index = 1;
-	int statusCode;
+	int statusCode = 0;
+
+	std::string protocol;
+	std::string statusText;
 
 	lua_createtable(lua_state, 0, 0);
 	std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-	for (itt = items.begin(); itt != items.end(); itt++)
+	for (itt = items.begin(); itt != items.end(); ++itt)
 	{
 		if (itt->reason == m_mainworker.m_eventsystem.REASON_URL)
 		{
-			lua_pushnumber(lua_state, (lua_Number)index);
+			lua_pushinteger(lua_state, index); // Is this an option here ?
 			lua_createtable(lua_state, 0, 0);
 			lua_pushstring(lua_state, "headers");
-			lua_createtable(lua_state, (int)itt->vData.size(), 0);
-			if (itt->vData.size() > 0)
+			lua_createtable(lua_state, (int)itt->vData.size() + 2, 0); // status is split into 3 parts
+			if (!itt->vData.empty())
 			{
 				std::vector<std::string>::const_iterator itt2;
-				for (itt2 = itt->vData.begin(); itt2 != itt->vData.end() - 1; itt2++)
+				for (itt2 = itt->vData.begin(); itt2 != itt->vData.end(); ++itt2)
 				{
-					size_t pos = (*itt2).find(": ");
+					std::string header = (*itt2);
+
+					size_t pos = header.find(": ");
 					if (pos != std::string::npos)
 					{
-						lua_pushstring(lua_state, (*itt2).substr(0, pos).c_str());
-						lua_pushstring(lua_state, (*itt2).substr(pos + 2).c_str());
+						lua_pushstring(lua_state, header.substr(0, pos).c_str());
+						lua_pushstring(lua_state, header.substr(pos + 2).c_str());
 						lua_rawset(lua_state, -3);
 					}
+					else
+					{
+						if (header.find("HTTP/") == 0)
+						{
+							std::vector<std::string> results;
+							StringSplit(header, " ", results);
+							if (results.size() >= 2)
+							{
+								pos = header.find(results[0]);
+								protocol = header.substr(0, pos + results[0].size());
+								statusCode = atoi(results[1].c_str());
+								if (results.size() >= 3)
+								{
+									statusText = header.substr(header.find(results[2]));
+								}
+								else
+								{
+									statusText = ((statusCode >= 200) && (statusCode <= 299)) ? "OK" : "No reason returned!";
+								}
+							}
+						}
+					}
 				}
-				// last item in vector is always the status code
-				itt2 = itt->vData.end() - 1;
-				std::stringstream ss(*itt2);
-				ss >> statusCode;
 			}
+			lua_rawset(lua_state, -3); //end of table
+
+			lua_pushstring(lua_state, "protocol");
+			lua_pushstring(lua_state, protocol.c_str());
+			lua_rawset(lua_state, -3);
+			lua_pushstring(lua_state, "statusText");
+			lua_pushstring(lua_state, statusText.c_str());
 			lua_rawset(lua_state, -3);
 			lua_pushstring(lua_state, "statusCode");
-			lua_pushnumber(lua_state, (lua_Number)statusCode);
+			lua_pushinteger(lua_state, statusCode);
 			lua_rawset(lua_state, -3);
 			lua_pushstring(lua_state, "data");
 			lua_pushstring(lua_state, itt->sValue.c_str());
@@ -145,14 +176,14 @@ bool CdzVents::OpenURL(lua_State *lua_state, const std::vector<_tLuaTableValues>
 	std::string URL, extraHeaders, method, postData, trigger;
 
 	std::vector<_tLuaTableValues>::const_iterator itt;
-	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); itt++)
+	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); ++itt)
 	{
 		if (itt->isTable && itt->sValue == "headers" && itt != vLuaTable.end() - 1)
 		{
 			int tIndex = itt->tIndex;
 			itt++;
 			std::vector<_tLuaTableValues>::const_iterator itt2;
-			for (itt2 = itt; itt2 != vLuaTable.end(); itt2++)
+			for (itt2 = itt; itt2 != vLuaTable.end(); ++itt2)
 			{
 				if (itt2->tIndex != tIndex)
 				{
@@ -183,10 +214,25 @@ bool CdzVents::OpenURL(lua_State *lua_state, const std::vector<_tLuaTableValues>
 				delayTime = static_cast<float>(itt->iValue);
 		}
 	}
+
 	if (URL.empty())
 	{
 		_log.Log(LOG_ERROR, "dzVents: No URL supplied!");
 		return false;
+	}
+
+	// Handle situation where WebLocalNetworks is not open without password for dzVents
+	if (URL.find("127.0.0.1") != std::string::npos)
+	{
+		std::string allowedNetworks;
+		int rnvalue = 0;
+		m_sql.GetPreferencesVar("WebLocalNetworks",rnvalue, allowedNetworks);
+		if (allowedNetworks.find("127.0.0.") == std::string::npos)
+		{
+			_log.Log(LOG_ERROR, "dzVents: local netWork not open for dzVents openURL call !");
+			_log.Log(LOG_ERROR, "dzVents: check dzVents wiki (look for 'Using dzVents with Domoticz')");
+			return false;
+		}
 	}
 
 	HTTPClient::_eHTTPmethod eMethod = HTTPClient::HTTP_METHOD_GET; // defaults to GET
@@ -205,23 +251,23 @@ bool CdzVents::OpenURL(lua_State *lua_state, const std::vector<_tLuaTableValues>
 
 bool CdzVents::UpdateDevice(lua_State *lua_state, const std::vector<_tLuaTableValues> &vLuaTable)
 {
-	std::string sValue;
-	uint64_t idx = -1;
-	int nValue;
+	bool bEventTrigger = false;
+	int nValue = -1, Protected = -1;
+	int idx = -1;
 	float delayTime = 0;
-	bool bEventTrigger = false, Protected = false;
+	std::string sValue;
 
 	std::vector<_tLuaTableValues>::const_iterator itt;
-	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); itt++)
+	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); ++itt)
 	{
 		if (itt->type == TYPE_INTEGER)
 		{
 			if (itt->name == "idx")
-				idx = static_cast<uint64_t>(itt->iValue);
+				idx = itt->iValue;
 			else if (itt->name == "nValue")
 				nValue = itt->iValue;
 			else if (itt->name == "protected")
-				Protected = itt->iValue ? true : false;
+				Protected = itt->iValue;
 			else if (itt->name == "_random")
 				delayTime = static_cast<float>(GenerateRandomNumber(itt->iValue));
 			else if (itt->name == "_after")
@@ -239,20 +285,76 @@ bool CdzVents::UpdateDevice(lua_State *lua_state, const std::vector<_tLuaTableVa
 	return true;
 }
 
-bool CdzVents::UpdateVariable(lua_State *lua_state, const std::vector<_tLuaTableValues> &vLuaTable)
+bool CdzVents::TriggerIFTTT(lua_State *lua_state, const std::vector<_tLuaTableValues> &vLuaTable)
 {
-	std::string variableName, variableValue;
-	float delayTime = 0;
-	bool bEventTrigger = false;
-	uint64_t idx;
+	std::string sID, sValue1, sValue2, sValue3 ;
+	float delayTime = 1;
+	int rnvalue = 0;
+
+	m_sql.GetPreferencesVar("IFTTTEnabled", rnvalue);
+	if (rnvalue == 0)
+	{
+		_log.Log(LOG_ERROR, "dzVents: IFTTT not enabled" );
+		return false;
+	}
 
 	std::vector<_tLuaTableValues>::const_iterator itt;
-	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); itt++)
+	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); ++itt)
+	{
+		if (itt->type == TYPE_INTEGER )
+		{
+			if (itt->name == "_random")
+				delayTime = static_cast<float>(GenerateRandomNumber(itt->iValue));
+
+			else if (itt->name == "_after")
+				delayTime = static_cast<float>(itt->iValue);
+
+			else if (itt->name == "sID")
+				 sID = std::to_string(itt->iValue);
+
+			else if (itt->name == "sValue1")
+				sValue1 = std::to_string(itt->iValue);
+
+			else if (itt->name == "sValue2")
+				sValue2 = std::to_string(itt->iValue);
+
+			else if (itt->name == "sValue3")
+				sValue2 = std::to_string(itt->iValue);
+		}
+		else if (itt->type == TYPE_STRING)
+		{
+			if (itt->name == "sID")
+				sID = itt->sValue;
+
+			else if (itt->name == "sValue1")
+				sValue1 = itt->sValue;
+
+			else if (itt->name == "sValue2")
+				sValue2 = itt->sValue;
+
+			else if (itt->name == "sValue3")
+				sValue3 = itt->sValue;
+		}
+	}
+
+	m_sql.AddTaskItem(_tTaskItem::SendIFTTTTrigger(delayTime, sID, sValue1, sValue2, sValue3));
+	return true;
+}
+
+bool CdzVents::UpdateVariable(lua_State *lua_state, const std::vector<_tLuaTableValues> &vLuaTable)
+{
+	std::string variableValue;
+	float delayTime = 0;
+	bool bEventTrigger = false;
+	int idx = 0;
+
+	std::vector<_tLuaTableValues>::const_iterator itt;
+	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); ++itt)
 	{
 		if (itt->type == TYPE_INTEGER)
 		{
 			if (itt->name == "idx")
-				idx = static_cast<uint64_t>(itt->iValue);
+				idx = itt->iValue;
 			else if (itt->name == "_random")
 				delayTime = static_cast<float>(GenerateRandomNumber(itt->iValue));
 			else if (itt->name == "_after")
@@ -264,6 +366,9 @@ bool CdzVents::UpdateVariable(lua_State *lua_state, const std::vector<_tLuaTable
 		else if (itt->type == TYPE_BOOLEAN && itt->name == "_trigger")
 			bEventTrigger = true;
 	}
+	if (idx == 0)
+		return false;
+
 	if (bEventTrigger)
 		m_mainworker.m_eventsystem.SetEventTrigger(idx, m_mainworker.m_eventsystem.REASON_USERVARIABLE, delayTime);
 
@@ -273,19 +378,22 @@ bool CdzVents::UpdateVariable(lua_State *lua_state, const std::vector<_tLuaTable
 
 bool CdzVents::CancelItem(lua_State *lua_state, const std::vector<_tLuaTableValues> &vLuaTable)
 {
-	uint64_t idx;
-	int count = 0;
+	int idx = 0;
 	std::string type;
 
 	std::vector<_tLuaTableValues>::const_iterator itt;
-	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); itt++)
+	for (itt = vLuaTable.begin(); itt != vLuaTable.end(); ++itt)
 	{
 		if (itt->type == TYPE_INTEGER && itt->name == "idx")
-			idx = static_cast<uint64_t>(itt->iValue);
+			idx = itt->iValue;
 
 		else if (itt->type == TYPE_STRING && itt->name == "type")
 			type = itt->sValue;
 	}
+
+	if (idx == 0)
+		return false;
+
 	_tTaskItem tItem;
 	tItem._idx = idx;
 	tItem._DelayTime = 0;
@@ -299,7 +407,6 @@ bool CdzVents::CancelItem(lua_State *lua_state, const std::vector<_tLuaTableValu
 		tItem._ItemType = TITEM_SWITCHCMD_SCENE;
 	else if (type == "variable")
 		tItem._ItemType = TITEM_SET_VARIABLE;
-
 
 	m_sql.AddTaskItem(tItem, true);
 	return true;
@@ -324,6 +431,9 @@ bool CdzVents::processLuaCommand(lua_State *lua_state, const std::string &filena
 
 		else if (lCommand == "Cancel")
 			scriptTrue = CancelItem(lua_state, vLuaTable);
+	
+		else if (lCommand == "TriggerIFTTT")
+			scriptTrue = TriggerIFTTT(lua_state, vLuaTable);
 	}
 	return scriptTrue;
 }
@@ -370,7 +480,7 @@ void CdzVents::IterateTable(lua_State *lua_state, const int tIndex, std::vector<
 		else if (std::string(luaL_typename(lua_state, -1)) == "number")
 		{
 			item.type = TYPE_INTEGER;
-			item.iValue = lua_tointeger(lua_state, -1);
+			item.iValue = (int)lua_tointeger(lua_state, -1);
 			item.name = std::string(lua_tostring(lua_state, -2));
 		}
 		else if (std::string(luaL_typename(lua_state, -1)) == "boolean")
@@ -397,11 +507,11 @@ int CdzVents::l_domoticz_print(lua_State* lua_state)
 			std::string lstring = lua_tostring(lua_state, i);
 			if (lstring.find("Error: ") != std::string::npos)
 			{
-				_log.Log(LOG_ERROR, "%s: %s", m_printprefix.c_str(), lstring.c_str());
+				_log.Log(LOG_ERROR, "dzVents: %s", lstring.c_str());
 			}
 			else
 			{
-				_log.Log(LOG_STATUS, "%s: %s", m_printprefix.c_str(), lstring.c_str());
+				_log.Log(LOG_STATUS, "dzVents: %s", lstring.c_str());
 			}
 		}
 		else
@@ -414,7 +524,7 @@ int CdzVents::l_domoticz_print(lua_State* lua_state)
 
 void CdzVents::SetGlobalVariables(lua_State *lua_state, const bool reasonTime, const int secStatus)
 {
-	std::stringstream lua_DirT;
+	std::stringstream lua_DirT, runtime_DirT;
 
 	lua_DirT << szUserDataFolder <<
 #ifdef WIN32
@@ -423,12 +533,22 @@ void CdzVents::SetGlobalVariables(lua_State *lua_state, const bool reasonTime, c
 	"scripts/dzVents/";
 #endif
 
+	runtime_DirT << szStartupFolder <<
+#ifdef WIN32
+	"dzVents\\runtime\\";
+#else
+	"dzVents/runtime/";
+#endif
+
 	lua_createtable(lua_state, 0, 0);
 	lua_pushstring(lua_state, "Security");
 	lua_pushstring(lua_state, m_mainworker.m_eventsystem.m_szSecStatus[secStatus].c_str());
 	lua_rawset(lua_state, -3);
 	lua_pushstring(lua_state, "script_path");
 	lua_pushstring(lua_state, lua_DirT.str().c_str());
+	lua_rawset(lua_state, -3);
+	lua_pushstring(lua_state, "runtime_path");
+	lua_pushstring(lua_state, runtime_DirT.str().c_str());
 	lua_rawset(lua_state, -3);
 	lua_pushstring(lua_state, "isTimeEvent");
 	lua_pushboolean(lua_state, reasonTime);
@@ -459,6 +579,39 @@ void CdzVents::SetGlobalVariables(lua_State *lua_state, const bool reasonTime, c
 	lua_pushstring(lua_state, "dzVents_log_level");
 	lua_pushnumber(lua_state, (lua_Number)rnvalue);
 	lua_rawset(lua_state, -3);
+
+	std::string sTitle;
+	m_sql.GetPreferencesVar("Title", sTitle);
+	lua_pushstring(lua_state, "domoticz_title");
+	lua_pushstring(lua_state, sTitle.c_str());
+	lua_rawset(lua_state, -3);
+
+	// Only when webLocalNetworks has local network defined
+	// Add latitude / longitude to table
+	std::string allowedNetworks;
+	rnvalue = 0;
+	m_sql.GetPreferencesVar("WebLocalNetworks",rnvalue, allowedNetworks);
+	if (allowedNetworks.find("127.0.0.") != std::string::npos)
+	{
+		std::string location;
+		std::vector<std::string> strarray;
+		if (m_sql.GetPreferencesVar("Location", rnvalue, location))
+			StringSplit(location, ";", strarray);
+		if (strarray.size() == 2)
+		{
+			// Only when location entered in the settings
+			// Add to table
+			std::string Latitude = strarray[0];
+			std::string Longitude = strarray[1];
+			lua_pushstring(lua_state, "longitude");
+			lua_pushstring(lua_state, Longitude.c_str());
+			lua_rawset(lua_state, -3);
+			lua_pushstring(lua_state, "latitude");
+			lua_pushstring(lua_state, Latitude.c_str());
+			lua_rawset(lua_state, -3);
+		}
+	}
+
 	lua_pushstring(lua_state, "domoticz_listening_port");
 	lua_pushstring(lua_state, m_webservers.our_listener_port.c_str());
 	lua_rawset(lua_state, -3);
@@ -472,7 +625,13 @@ void CdzVents::SetGlobalVariables(lua_State *lua_state, const bool reasonTime, c
 	lua_pushstring(lua_state, TimeToString(NULL, TF_DateTimeMs).c_str());
 	lua_rawset(lua_state, -3);
 	lua_pushstring(lua_state, "systemUptime");
-	lua_pushnumber(lua_state, (lua_Number)SystemUptime());
+	lua_pushinteger(lua_state, SystemUptime());
+	lua_rawset(lua_state, -3);
+	lua_pushstring(lua_state, "domoticz_version");
+	lua_pushstring(lua_state, szAppVersion.c_str());
+	lua_rawset(lua_state, -3);
+	lua_pushstring(lua_state, "dzVents_version");
+	lua_pushstring(lua_state,(GetVersion().c_str()));
 	lua_rawset(lua_state, -3);
 	lua_setglobal(lua_state, "globalvariables");
 }
@@ -504,9 +663,9 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 
 		bool triggerDevice = false;
 		std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-		for (itt = items.begin(); itt != items.end(); itt++)
+		for (itt = items.begin(); itt != items.end(); ++itt)
 		{
-			if (sitem.ID == itt->DeviceID && itt->reason == m_mainworker.m_eventsystem.REASON_DEVICE)
+			if (sitem.ID == itt->id && itt->reason == m_mainworker.m_eventsystem.REASON_DEVICE)
 			{
 				triggerDevice = true;
 				sitem.lastUpdate = itt->lastUpdate;
@@ -530,15 +689,18 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		ParseSQLdatetime(checktime, ntime, sitem.lastUpdate, tm1.tm_isdst);
 		bool timed_out = (now - checktime >= SensorTimeOut * 60);
 
-		lua_pushnumber(lua_state, (lua_Number)index);
+		lua_pushinteger(lua_state, index);
 
-		lua_createtable(lua_state, 1, 11);
+		lua_createtable(lua_state, 1, 12);
 
 		lua_pushstring(lua_state, "name");
 		lua_pushstring(lua_state, sitem.deviceName.c_str());
 		lua_rawset(lua_state, -3);
+		lua_pushstring(lua_state, "protected");
+		lua_pushboolean(lua_state, ((lua_Number)sitem.protection) == 1 );
+		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "id");
-		lua_pushnumber(lua_state, (lua_Number)sitem.ID);
+		lua_pushinteger(lua_state, sitem.ID);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "baseType");
 		lua_pushstring(lua_state, "device");
@@ -553,13 +715,13 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		lua_pushstring(lua_state, Switch_Type_Desc((_eSwitchType)sitem.switchtype));
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "switchTypeValue");
-		lua_pushnumber(lua_state, (lua_Number)sitem.switchtype);
+		lua_pushinteger(lua_state, sitem.switchtype);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "lastUpdate");
 		lua_pushstring(lua_state, sitem.lastUpdate.c_str());
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "lastLevel");
-		lua_pushnumber(lua_state, (lua_Number)sitem.lastLevel);
+		lua_pushinteger(lua_state, sitem.lastLevel);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "changed");
 		lua_pushboolean(lua_state, triggerDevice);
@@ -577,7 +739,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 
 		for (uint8_t i = 0; i < strarray.size(); i++)
 		{
-			lua_pushnumber(lua_state, (lua_Number)i + 1);
+			lua_pushinteger(lua_state, i + 1);
 			lua_pushstring(lua_state, strarray[i].c_str());
 			lua_rawset(lua_state, -3);
 		}
@@ -590,10 +752,10 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		lua_pushstring(lua_state, sitem.description.c_str());
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "batteryLevel");
-		lua_pushnumber(lua_state, (lua_Number)sitem.batteryLevel);
+		lua_pushinteger(lua_state, sitem.batteryLevel);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "signalLevel");
-		lua_pushnumber(lua_state, (lua_Number)sitem.signalLevel);
+		lua_pushinteger(lua_state, sitem.signalLevel);
 		lua_rawset(lua_state, -3);
 
 		lua_pushstring(lua_state, "data");
@@ -604,12 +766,11 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		lua_rawset(lua_state, -3);
 
 		lua_pushstring(lua_state, "_nValue");
-		lua_pushnumber(lua_state, (lua_Number)sitem.nValue);
+		lua_pushinteger(lua_state, sitem.nValue);
 		lua_rawset(lua_state, -3);
 
-
 		lua_pushstring(lua_state, "hardwareID");
-		lua_pushnumber(lua_state, (lua_Number)sitem.hardwareID);
+		lua_pushinteger(lua_state, sitem.hardwareID);
 		lua_rawset(lua_state, -3);
 
 		// Lux does not have it's own field yet.
@@ -617,7 +778,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		{
 			lua_pushstring(lua_state, "lux");
 			if (strarray.size() > 0)
-				lua_pushnumber(lua_state, (lua_Number)atoi(strarray[0].c_str()));
+				lua_pushinteger(lua_state, atoi(strarray[0].c_str()));
 			else
 				lua_pushnumber(lua_state, (lua_Number)0);
 			lua_rawset(lua_state, -3);
@@ -646,7 +807,11 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 			for (itt = sitem.JsonMapString.begin(); itt != sitem.JsonMapString.end(); ++itt)
 			{
 				lua_pushstring(lua_state, m_mainworker.m_eventsystem.JsonMap[itt->first].szNew);
-				lua_pushstring(lua_state, itt->second.c_str());
+				if (strcmp(m_mainworker.m_eventsystem.JsonMap[itt->first].szOriginal, "LevelNames") == 0 ||
+					strcmp(m_mainworker.m_eventsystem.JsonMap[itt->first].szOriginal, "LevelActions") == 0)
+					lua_pushstring(lua_state, base64_decode(itt->second).c_str());
+				else
+					lua_pushstring(lua_state, itt->second.c_str());
 				lua_rawset(lua_state, -3);
 			}
 		}
@@ -668,7 +833,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 			for (itt = sitem.JsonMapInt.begin(); itt != sitem.JsonMapInt.end(); ++itt)
 			{
 				lua_pushstring(lua_state, m_mainworker.m_eventsystem.JsonMap[itt->first].szNew);
-				lua_pushnumber(lua_state, itt->second);
+				lua_pushinteger(lua_state, itt->second);
 				lua_rawset(lua_state, -3);
 			}
 		}
@@ -700,9 +865,9 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		CEventSystem::_tScenesGroups sgitem = ittScenes->second;
 		bool triggerScene = false;
 		std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-		for (itt = items.begin(); itt != items.end(); itt++)
+		for (itt = items.begin(); itt != items.end(); ++itt)
 		{
-			if (sgitem.ID == itt->DeviceID && itt->reason == m_mainworker.m_eventsystem.REASON_SCENEGROUP)
+			if (sgitem.ID == itt->id && itt->reason == m_mainworker.m_eventsystem.REASON_SCENEGROUP)
 			{
 				triggerScene = true;
 				sgitem.lastUpdate = itt->lastUpdate;
@@ -712,26 +877,29 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 
 		std::vector<std::vector<std::string> > result;
 		result = m_sql.safe_query("SELECT Description FROM Scenes WHERE (ID=='%d')", sgitem.ID);
-		if (result.size() == 0)
+		if (result.empty())
 			description = "";
 		else
 			description = result[0][0].c_str();
 
-		lua_pushnumber(lua_state, (lua_Number)index);
+		lua_pushinteger(lua_state, index);
 
-		lua_createtable(lua_state, 1, 6);
+		lua_createtable(lua_state, 1, 7);
 
 		lua_pushstring(lua_state, "name");
 		lua_pushstring(lua_state, sgitem.scenesgroupName.c_str());
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "id");
-		lua_pushnumber(lua_state, (lua_Number)sgitem.ID);
+		lua_pushinteger(lua_state, sgitem.ID);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "description");
 		lua_pushstring(lua_state, description);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "baseType");
 		lua_pushstring(lua_state, (sgitem.scenesgroupType == 0) ? "scene" : "group");
+		lua_rawset(lua_state, -3);
+		lua_pushstring(lua_state, "protected");
+		lua_pushboolean(lua_state, (lua_Number)sgitem.protection == 1);
 		lua_rawset(lua_state, -3);
 
 		lua_pushstring(lua_state, "lastUpdate");
@@ -756,10 +924,10 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		if (sgitem.memberID.size() > 0)
 		{
 			int index = 1;
-			for (itt2 = sgitem.memberID.begin(); itt2 != sgitem.memberID.end(); itt2++)
+			for (itt2 = sgitem.memberID.begin(); itt2 != sgitem.memberID.end(); ++itt2)
 			{
-				lua_pushnumber(lua_state, (lua_Number)index);
-				lua_pushnumber(lua_state, (lua_Number)*itt2);
+				lua_pushinteger(lua_state, index);
+				lua_pushinteger(lua_state, *itt2);
 				lua_rawset(lua_state, -3);
 				index++;
 			}
@@ -781,9 +949,9 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		CEventSystem::_tUserVariable uvitem = it_var->second;
 		bool triggerVar = false;
 		std::vector<CEventSystem::_tEventQueue>::const_iterator itt;
-		for (itt = items.begin(); itt != items.end(); itt++)
+		for (itt = items.begin(); itt != items.end(); ++itt)
 		{
-			if (uvitem.ID == itt->varId && itt->reason == m_mainworker.m_eventsystem.REASON_USERVARIABLE)
+			if (uvitem.ID == itt->id && itt->reason == m_mainworker.m_eventsystem.REASON_USERVARIABLE)
 			{
 				triggerVar = true;
 				uvitem.lastUpdate = itt->lastUpdate;
@@ -791,7 +959,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 			}
 		}
 
-		lua_pushnumber(lua_state, (lua_Number)index);
+		lua_pushinteger(lua_state, index);
 
 		lua_createtable(lua_state, 1, 5);
 
@@ -799,7 +967,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		lua_pushstring(lua_state, uvitem.variableName.c_str());
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "id");
-		lua_pushnumber(lua_state, (lua_Number)uvitem.ID);
+		lua_pushinteger(lua_state, uvitem.ID);
 		lua_rawset(lua_state, -3);
 		lua_pushstring(lua_state, "baseType");
 		lua_pushstring(lua_state, "uservariable");
@@ -818,7 +986,7 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		if (uvitem.variableType == 0)
 		{
 			//Integer
-			lua_pushnumber(lua_state, atoi(uvitem.variableValue.c_str()));
+			lua_pushinteger(lua_state, atoi(uvitem.variableValue.c_str()));
 			vtype = "integer";
 		}
 		else if (uvitem.variableType == 1)
@@ -851,6 +1019,35 @@ void CdzVents::ExportDomoticzDataToLua(lua_State *lua_state, const std::vector<C
 		lua_settable(lua_state, -3); // end entry
 
 		index++;
+	}
+
+	// Now do the cameras.
+	std::vector<std::vector<std::string> > result;
+	result = m_sql.safe_query("SELECT ID, Name FROM Cameras where enabled = '1' ORDER BY ID ASC");
+	if (!result.empty())
+	{
+		for (const auto & itt : result)
+		{
+			std::vector<std::string> sd = itt;
+			lua_pushinteger(lua_state, index);
+			lua_createtable(lua_state, 1, 3);
+
+			lua_pushstring(lua_state, "name");
+			lua_pushstring(lua_state, sd[1].c_str());
+			lua_rawset(lua_state, -3);
+
+			lua_pushstring(lua_state, "id");
+			lua_pushinteger(lua_state, atoi(sd[0].c_str()));
+			lua_rawset(lua_state, -3);
+
+			lua_pushstring(lua_state, "baseType");
+			lua_pushstring(lua_state, "camera");
+			lua_rawset(lua_state, -3);
+
+			lua_settable(lua_state, -3); // end entry
+
+			index++;
+		}
 	}
 
 	lua_setglobal(lua_state, "domoticzData");

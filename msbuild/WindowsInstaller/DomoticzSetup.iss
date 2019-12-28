@@ -8,6 +8,7 @@
 #define MyAppExeName "domoticz.exe"
 #define NSSM "nssm.exe"
 #define SetupBaseName   "DomoticzSetup_"
+#define SetupName   "DomoticzSetup"
 #dim Version[4]
 #expr ParseVersion("..\Release\domoticz.exe", Version[0], Version[1], Version[2], Version[3])
 #define AppVersion Str(Version[0]) + "." + Str(Version[1]) + "." + Str(Version[2]) + "." + Str(Version[3])
@@ -31,6 +32,7 @@ AllowNoIcons=yes
 LicenseFile=..\..\License.txt
 OutputDir=.
 OutputBaseFilename={#SetupBaseName + ShortAppVersionUnderscore}
+; OutputBaseFilename={#SetupName}
 SetupIconFile=install.ico
 Compression=lzma2
 PrivilegesRequired=admin
@@ -74,6 +76,7 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\Domoticz"; Filenam
 [Run]
 ;Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, "&", "&&")}}"; Flags: nowait postinstall skipifsilent runascurrentuser; Tasks: RunAsApp
 Filename: "{app}\{#NSSM}"; Parameters: "install {#MyAppName} ""{app}\{#MyAppExeName}"" ""{code:GetParamsService}"""; Flags: runhidden; Tasks: RunAsService
+Filename: "{app}\{#NSSM}"; Parameters: "set {#MyAppName} DependOnService RpcSS LanmanWorkstation"; Flags: runhidden; Tasks: RunAsService
 Filename: "{sys}\net.exe"; Parameters: "start {#MyAppName}"; Flags: runhidden; Tasks: RunAsService
 
 [Dirs]

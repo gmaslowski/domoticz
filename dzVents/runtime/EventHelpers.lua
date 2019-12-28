@@ -1,4 +1,4 @@
-	local GLOBAL_DATA_MODULE = 'global_data'
+local GLOBAL_DATA_MODULE = 'global_data'
 local GLOBAL = false
 local LOCAL = true
 
@@ -29,13 +29,19 @@ local function EventHelpers(domoticz, mainMethod)
 	local _url = 'http://127.0.0.1:' .. (tostring(globalvariables['domoticz_listening_port']) or "8080")
 
 	local settings = {
-		['Log level'] = tonumber(globalvariables['dzVents_log_level']) or  1,
+		['Log level'] = tonumber(globalvariables['dzVents_log_level']) or 1,
 		['Domoticz url'] = _url,
-		['url'] = url,
-		['webRoot'] = tostring(webRoot),
-		['serverPort'] = globalvariables['domoticz_listening_port'] or '8080'
+		url = url,
+		webRoot = tostring(webRoot),
+		serverPort = globalvariables['domoticz_listening_port'] or '8080',
+		dzVentsVersion = globalvariables.dzVents_version,
+		domoticzVersion = globalvariables.domoticz_version,
+		location = {
+			name = utils.urlDecode(globalvariables['domoticz_title'] or "Domoticz"),
+			latitude = globalvariables.latitude or 0,
+			longitude = globalvariables.longitude or 0,
+		}
 	}
-
 
 	if (webRoot ~= '' and webRoot ~= nil) then
 		settings['Domoticz url'] = settings['Domoticz url'] .. '/' .. tostring(webRoot)
@@ -70,6 +76,9 @@ local function EventHelpers(domoticz, mainMethod)
 		if (storageDef ~= nil) then
 			-- load the datafile for this module
 			ok, fileStorage = pcall(require, module)
+			if type(fileStorage) == boolean then
+				utils.log('Problem with module: ' .. module, utils.LOG_ERROR)
+			end
 			package.loaded[module] = nil -- no caching
 			if (ok) then
 				-- only transfer data as defined in storageDef
@@ -216,7 +225,6 @@ local function EventHelpers(domoticz, mainMethod)
 			-- ==================
 			local ok, res, info
 
-
 			if (device ~= nil) then
 				info = getEventInfo(eventHandler, self.domoticz.EVENT_TYPE_DEVICE)
 				ok, res = pcall(eventHandler['execute'], self.domoticz, device, info)
@@ -271,7 +279,7 @@ local function EventHelpers(domoticz, mainMethod)
 
 				return res
 			else
-				utils.log('An error occured when calling event handler ' .. eventHandler.name, utils.LOG_ERROR)
+				utils.log('An error occurred when calling event handler ' .. eventHandler.name, utils.LOG_ERROR)
 				utils.log(res, utils.LOG_ERROR) -- error info
 			end
 		else
@@ -370,6 +378,7 @@ local function EventHelpers(domoticz, mainMethod)
 				moduleLabel = eventHandler.name .. ''
 			end
 
+			_G.moduleLabel = eventHandler.name
 			if (device) then
 				moduleLabelInfo = ' Device: "' .. device.name .. ' (' .. device.hardwareName .. ')", Index: ' .. tostring(device.id)
 			elseif (variable) then
@@ -383,10 +392,19 @@ local function EventHelpers(domoticz, mainMethod)
 			end
 
 			triggerInfo = eventHandler.trigger and ', trigger: ' .. eventHandler.trigger or ''
-
-			utils.log('------ Start ' ..  scriptType ..  moduleLabel ..':' .. moduleLabelInfo .. triggerInfo, utils.LOG_MODULE_EXEC_INFO)
+			local clockTimeStampAtStart = os.clock()
+			local timeStampAtStart = os.time()
+			utils.log('------ Start ' .. scriptType .. moduleLabel ..':' .. moduleLabelInfo .. triggerInfo, utils.LOG_MODULE_EXEC_INFO)
 			self.callEventHandler(eventHandler, device, variable, security, scenegroup, httpResponse)
-			utils.log('------ Finished ' .. moduleLabel, utils.LOG_MODULE_EXEC_INFO)
+			local clockTimeSpend = os.clock() - clockTimeStampAtStart
+			local realTimeSpend = os.time() - timeStampAtStart
+			if realTimeSpend > 9 or clockTimeSpend > 7 then
+				utils.log('------ Finished ' .. moduleLabel .. ' after >' .. realTimeSpend .. ' seconds. (using '.. tostring(clockTimeSpend):sub(1,5) .. ' seconds CPU time !)' , utils.LOG_ERROR)
+			elseif realTimeSpend > 6 or clockTimeSpend > 5 then
+				utils.log('------ Finished ' .. moduleLabel .. ' after >' .. realTimeSpend .. ' seconds. (using '.. tostring(clockTimeSpend):sub(1,5) .. ' seconds CPU time !)' , utils.LOG_FORCE)
+			else
+				utils.log('------ Finished ' .. moduleLabel , utils.LOG_MODULE_EXEC_INFO)
+			end
 
 			restoreLogging()
 		end
@@ -438,14 +456,13 @@ local function EventHelpers(domoticz, mainMethod)
 		table.insert(bindings[event], module)
 	end
 
-	function self.getEventBindings(mode, testTime)
-		local bindings = {}
+	local function loadEventScripts()
+		local scripts = {}
 		local errModules = {}
 		local internalScripts
-		local hasInternals = false
-		local ok, diskScripts, externalNames, moduleName, i, event, j, device, err
+		local ok, diskScripts, externalNames, moduleName, i, event, j, err
 		local modules = {}
-
+		local scripts = {}
 
 		ok, diskScripts, externalNames = pcall(self.scandir, _G.scriptsFolderPath, 'external')
 
@@ -472,10 +489,23 @@ local function EventHelpers(domoticz, mainMethod)
 			end
 		end
 
-
-		if (mode == nil) then mode = 'device' end
-
+		-- extract global_data module and make sure it is the first in the list
+		-- because then peeps can create some globals available everywhere before the other modules load
+		local globalIx
 		for i, moduleInfo in pairs(modules) do
+			if (moduleInfo.name == GLOBAL_DATA_MODULE) then
+				globalIx = i
+				break
+			end
+		end
+
+		if (globalIx ~= nil and globalIx > 1) then
+			local globalModule = modules[globalIx]
+			table.remove(modules, globalIx)
+			table.insert(modules, 1, globalModule)
+		end
+
+		for i, moduleInfo in ipairs(modules) do
 
 			local module, skip
 
@@ -535,100 +565,8 @@ local function EventHelpers(domoticz, mainMethod)
 								module.type = moduleInfo.type
 								module.dataFileName = '__data_' .. moduleName
 								module.dataFilePath = _G.dataFolderPath .. '/__data_' .. moduleName .. '.lua'
-								for j, event in pairs(module.on) do
-									if (mode == 'timer') then
-										if (type(j) == 'string' and j == 'timer' and type(event) == 'table') then
-											-- { ['timer'] = { 'every minute ', 'every hour' } }
-											local triggered, def = self.processTimeRules(event)
-											if (triggered) then
-												-- this one can be executed
-												module.trigger = def
-												table.insert(bindings, module)
-											end
-										end
-									elseif (mode == 'device') then
-										if (event ~= 'timer'
-											and j ~= 'timer'
-											and j ~= 'variable'
-											and j ~= 'variables'
-											and j ~= 'security'
-											and j ~= 'scenes'
-											and j ~= 'groups'
-										) then
 
-											if (type(j) == 'string' and j == 'devices' and type(event) == 'table') then
-
-												-- { ['devices'] = { 'devA', ['devB'] = { ..timedefs }, .. }
-
-												for devIdx, devName in pairs(event) do
-
-													-- detect if devName is of the form ['devB'] = { 'every hour' }
-													if (type(devName) == 'table') then
-														local triggered, def = self.processTimeRules(devName, testTime)
-														if (triggered) then
-															addBindingEvent(bindings, devIdx, module)
-														end
-													else
-														-- a single device name (or id)
-														addBindingEvent(bindings, devName, module)
-													end
-												end
-											end
-										end
-									elseif (mode == 'scenegroups') then
-										if (event ~= 'timer'
-											and j ~= 'timer'
-											and j ~= 'variable'
-											and j ~= 'variables'
-											and j ~= 'security'
-											and j ~= 'devices'
-										) then
-
-											if (type(j) == 'string' and (j == 'scenes' or j == 'groups') and type(event) == 'table') then
-
-												-- { ['scenes'] = { 'scA', ['scB'] = { ..timedefs }, .. }
-
-												for devIdx, scgrpName in pairs(event) do
-
-													-- detect if scgrpName is of the form ['devB'] = { 'every hour' }
-													if (type(scgrpName) == 'table') then
-														local triggered, def = self.processTimeRules(scgrpName, testTime)
-														if (triggered) then
-															addBindingEvent(bindings, devIdx, module)
-														end
-													else
-														-- a single scene or group name (or id)
-														addBindingEvent(bindings, scgrpName, module)
-													end
-												end
-											end
-										end
-									elseif (mode == 'variable') then
-										if (type(j) == 'string' and j == 'variables' and type(event) == 'table') then
-											-- { ['variables'] = { 'varA', 'varB' }
-											for varIdx, varName in pairs(event) do
-												addBindingEvent(bindings, varName, module)
-											end
-										end
-									elseif (mode == 'security') then
-										if (type(j) == 'string' and j == 'security' and type(event) == 'table') then
-
-											local triggered, def = self.checkSecurity(event, self.domoticz.security)
-											if (triggered) then
-												table.insert(bindings, module)
-												module.trigger = def
-											end
-
-										end
-									elseif (mode == 'httpResponse') then
-										if (type(j) == 'string' and j == 'httpResponses' and type(event) == 'table') then
-											-- { ['httpResponses'] = { 'callbackA', 'callbackB' }
-											for i, callbackName in pairs(event) do
-												addBindingEvent(bindings, callbackName, module)
-											end
-										end
-									end
-								end
+								table.insert(scripts, module)
 							else
 								utils.log(logScript .. moduleName .. '.lua has no "on" and/or "execute" section, not a dzVents module. Skipping', utils.LOG_DEBUG)
 								--table.insert(errModules, moduleName)
@@ -645,7 +583,123 @@ local function EventHelpers(domoticz, mainMethod)
 			end
 		end
 
-		return bindings, errModules
+		return scripts, errModules
+	end
+
+	function self.getEventBindings(mode, testTime)
+		local bindings = {}
+		local ok, i, event, j, device, err
+		local modules = {}
+
+		if not self.scripts then
+			self.scripts, self.errModules = loadEventScripts()
+		end
+
+		if (mode == nil) then mode = 'device' end
+
+		for i, module in pairs(self.scripts) do
+
+			local logScript = (module.type == 'external' and 'Script ' or 'Internal script ')
+
+			for j, event in pairs(module.on) do
+				if (mode == 'timer') then
+					if (type(j) == 'string' and j == 'timer' and type(event) == 'table') then
+
+						-- { ['timer'] = { 'every minute ', 'every hour' } }
+
+						local triggered, def = self.processTimeRules(event)
+						if (triggered) then
+							-- this one can be executed
+							module.trigger = def
+						table.insert(bindings, module)
+						end
+					end
+				elseif (mode == 'device') then
+					if (event ~= 'timer'
+						and j ~= 'timer'
+						and j ~= 'variable'
+						and j ~= 'variables'
+						and j ~= 'security'
+						and j ~= 'scenes'
+						and j ~= 'groups'
+					) then
+
+					if (type(j) == 'string' and j == 'devices' and type(event) == 'table') then
+
+							-- { ['devices'] = { 'devA', ['devB'] = { ..timedefs }, .. }
+
+							for devIdx, devName in pairs(event) do
+
+								-- detect if devName is of the form ['devB'] = { 'every hour' }
+									if (type(devName) == 'table') then
+									local triggered, def = self.processTimeRules(devName, testTime)
+									if (triggered) then
+										addBindingEvent(bindings, devIdx, module)
+									end
+								else
+									-- a single device name (or id)
+									addBindingEvent(bindings, devName, module)
+								end
+							end
+						end
+					end
+				elseif (mode == 'scenegroups') then
+					if (event ~= 'timer'
+						and j ~= 'timer'
+						and j ~= 'variable'
+						and j ~= 'variables'
+						and j ~= 'security'
+						and j ~= 'devices'
+					) then
+
+						if (type(j) == 'string' and (j == 'scenes' or j == 'groups') and type(event) == 'table') then
+
+							-- { ['scenes'] = { 'scA', ['scB'] = { ..timedefs }, .. }
+
+							for devIdx, scgrpName in pairs(event) do
+
+								-- detect if scgrpName is of the form ['devB'] = { 'every hour' }
+								if (type(scgrpName) == 'table') then
+									local triggered, def = self.processTimeRules(scgrpName, testTime)
+									if (triggered) then
+										addBindingEvent(bindings, devIdx, module)
+									end
+								else
+									-- a single scene or group name (or id)
+									addBindingEvent(bindings, scgrpName, module)
+								end
+							end
+						end
+					end
+				elseif (mode == 'variable') then
+					if (type(j) == 'string' and j == 'variables' and type(event) == 'table') then
+						-- { ['variables'] = { 'varA', 'varB' }
+						for varIdx, varName in pairs(event) do
+							addBindingEvent(bindings, varName, module)
+						end
+					end
+				elseif (mode == 'security') then
+					if (type(j) == 'string' and j == 'security' and type(event) == 'table') then
+
+						local triggered, def = self.checkSecurity(event, self.domoticz.security)
+						if (triggered) then
+							table.insert(bindings, module)
+							module.trigger = def
+						end
+
+					end
+				elseif (mode == 'httpResponse') then
+					if (type(j) == 'string' and j == 'httpResponses' and type(event) == 'table') then
+						-- { ['httpResponses'] = { 'callbackA', 'callbackB' }
+						for i, callbackName in pairs(event) do
+							addBindingEvent(bindings, callbackName, module)
+						end
+					end
+				end
+			end
+		end
+
+		return bindings, self.errModules
 	end
 
 	function self.getTimerHandlers()
@@ -668,7 +722,6 @@ local function EventHelpers(domoticz, mainMethod)
 		local printed = false
 		local level = utils.LOG_DEBUG
 
-
 		if (fromIndex == nil) then
 			fromIndex = 1
 		end
@@ -684,7 +737,7 @@ local function EventHelpers(domoticz, mainMethod)
 				end
 				if (type(v) == 'table') then
 					for kk, vv in pairs(v) do
-						utils.log('• ' .. kk .. ' = ' .. _.str(vv), level)
+						utils.log('- ' .. kk .. ' = ' .. _.str(vv), level)
 					end
 				else
 					utils.log(k .. ' = ' .. v, level)
@@ -728,13 +781,16 @@ local function EventHelpers(domoticz, mainMethod)
 		-- id is done later
 
 		for scriptTrigger, scripts in pairs(allEventScripts) do
-			if (string.find(scriptTrigger, '*')) then -- a wild-card was use
-				-- turn it into a valid regexp
-				scriptTrigger = string.gsub(scriptTrigger, "*", ".*")
 
-				if (string.match(target, scriptTrigger)) then
-					-- there is trigger for this target
+			if (string.find(scriptTrigger, '*')) then -- a wild-card was used
+				scriptTrigger = ('^' .. scriptTrigger:gsub("[%^$]","."):gsub("*", ".*") .. '$')
 
+				local function sMatch(text, match) -- specialized sanitized match function to allow combination of Lua magic chars in wildcards
+					local sanitizedMatch = match:gsub("([%%%(%)%[%]%+%-%?])", "%%%1") -- escaping all 'magic' chars except *, ., ^ and $
+					return text:match(sanitizedMatch)
+				end
+
+				if sMatch(target, scriptTrigger) then
 					if modules == nil then modules = {} end
 
 					for i, mod in pairs(scripts) do
@@ -920,7 +976,7 @@ local function EventHelpers(domoticz, mainMethod)
 				local scriptsToExecute = self.findScriptForTarget(callback, httpResponseScripts)
 
 				if (scriptsToExecute ~= nil) then
-					utils.log('Handling httpResponse-events for: "' .. callback, utils.LOG_INFO)
+					utils.log('Handling httpResponse-events for: "' .. callback .. '"', utils.LOG_INFO)
 					self.handleEvents(scriptsToExecute, nil, nil, nil, nil, response)
 					self.dumpCommandArray(self.domoticz.commandArray, caSize + 1)
 				end
@@ -942,30 +998,30 @@ local function EventHelpers(domoticz, mainMethod)
 		local length = 0
 
 		domoticz.changedDevices().forEach( function(device)
-			table.insert(items, '• Device: ' .. device.name)
+			table.insert(items, '- Device: ' .. device.name)
 			length = length + 1
 		end)
 
 		domoticz.changedVariables().forEach(function(variable)
-			table.insert(items, '• Variable: ' .. variable.name)
+			table.insert(items, '- Variable: ' .. variable.name)
 			length = length + 1
 		end)
 
 		local securityUpdates =_G.securityupdates
 		if (securityUpdates ~= nil) then
 			for i, securityState in pairs(securityUpdates) do
-				table.insert(items, '• Security: ' .. securityState)
+				table.insert(items, '- Security: ' .. securityState)
 				length = length + 1
 			end
 		end
 
 		domoticz.changedScenes().forEach(function(scene)
-			table.insert(items, '• Scene: ' .. scene.name)
+			table.insert(items, '- Scene: ' .. scene.name)
 			length = length + 1
 		end)
 
 		domoticz.changedGroups().forEach(function(group)
-			table.insert(items, '• Group: ' .. group.name)
+			table.insert(items, '- Group: ' .. group.name)
 			length = length + 1
 		end)
 
@@ -973,7 +1029,7 @@ local function EventHelpers(domoticz, mainMethod)
 
 		if (responses ~= nil) then
 			for i, response in pairs(responses) do
-				table.insert(items, '• HTTPResponse: ' .. response.callback)
+				table.insert(items, '- HTTPResponse: ' .. response.callback)
 				length = length + 1
 			end
 		end

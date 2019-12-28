@@ -12,7 +12,6 @@
 #include "../main/WebServer.h"
 
 #include <sstream>
-#include <map>
 
 #define RETRY_DELAY 30
 
@@ -95,8 +94,8 @@ static struct {
 	const char *iscpCmd;
 	const char *iscpMute;
 	const char *name;
-	int switchType;
-	int subtype;
+	uint8_t switchType;
+	uint8_t subtype;
 	int customImage;
 	const char *options;
 	struct selector_name *default_names;
@@ -131,11 +130,9 @@ static struct {
 
 
 OnkyoAVTCP::OnkyoAVTCP(const int ID, const std::string &IPAddress, const unsigned short usIPPort) :
-m_szIPAddress(IPAddress)
+	m_szIPAddress(IPAddress)
 {
 	m_HwdID=ID;
-	m_bDoRestart=false;
-	m_stoprequested=false;
 	m_usIPPort=usIPPort;
 	m_retrycntr = RETRY_DELAY;
 	m_pPartialPkt = NULL;
@@ -155,41 +152,26 @@ OnkyoAVTCP::~OnkyoAVTCP(void)
 
 bool OnkyoAVTCP::StartHardware()
 {
-	m_stoprequested=false;
-	m_bDoRestart=false;
+	RequestStart();
 
 	//force connect the next first time
 	m_retrycntr=RETRY_DELAY;
 	m_bIsStarted=true;
 
 	//Start worker thread
-	m_thread = boost::shared_ptr<boost::thread>(new boost::thread(boost::bind(&OnkyoAVTCP::Do_Work, this)));
-	return (m_thread!=NULL);
+	m_thread = std::make_shared<std::thread>(&OnkyoAVTCP::Do_Work, this);
+	SetThreadNameInt(m_thread->native_handle());
+	return (m_thread != nullptr);
 }
 
 bool OnkyoAVTCP::StopHardware()
 {
-	m_stoprequested=true;
-	try {
-		if (m_thread)
-		{
-			m_thread->join();
-		}
-	}
-	catch (...)
+	if (m_thread)
 	{
-		//Don't throw from a Stop command
+		RequestStop();
+		m_thread->join();
+		m_thread.reset();
 	}
-	if (isConnected())
-	{
-		try {
-			disconnect();
-		} catch(...)
-		{
-			//Don't throw from a Stop command
-		}
-	}
-
 	m_bIsStarted=false;
 	return true;
 }
@@ -197,7 +179,6 @@ bool OnkyoAVTCP::StopHardware()
 void OnkyoAVTCP::OnConnect()
 {
 	_log.Log(LOG_STATUS,"OnkyoAVTCP: connected to: %s:%d", m_szIPAddress.c_str(), m_usIPPort);
-	m_bDoRestart=false;
 	m_bIsStarted=true;
 
 	SendPacket("NRIQSTN");
@@ -211,43 +192,24 @@ void OnkyoAVTCP::OnDisconnect()
 
 void OnkyoAVTCP::Do_Work()
 {
-	bool bFirstTime=true;
 	int sec_counter = 0;
-	while (!m_stoprequested)
+	connect(m_szIPAddress, m_usIPPort);
+	while (!IsStopRequested(1000))
 	{
-		sleep_seconds(1);
 		sec_counter++;
 
 		if (sec_counter  % 12 == 0) {
-			m_LastHeartbeat=mytime(NULL);
-		}
-
-		if (bFirstTime)
-		{
-			bFirstTime=false;
-			connect(m_szIPAddress,m_usIPPort);
-		}
-		else
-		{
-			if ((m_bDoRestart) && (sec_counter % 30 == 0))
-			{
-				connect(m_szIPAddress,m_usIPPort);
-			}
-			update();
+			m_LastHeartbeat = mytime(NULL);
 		}
 	}
+	terminate();
+
 	_log.Log(LOG_STATUS,"OnkyoAVTCP: TCP/IP Worker stopped...");
 }
 
 void OnkyoAVTCP::OnData(const unsigned char *pData, size_t length)
 {
-	boost::lock_guard<boost::mutex> l(readQueueMutex);
 	ParseData(pData,length);
-}
-
-void OnkyoAVTCP::OnError(const std::exception e)
-{
-	_log.Log(LOG_ERROR,"OnkyoAVTCP: Error: %s",e.what());
 }
 
 void OnkyoAVTCP::OnError(const boost::system::error_code& error)
@@ -273,9 +235,9 @@ void OnkyoAVTCP::OnError(const boost::system::error_code& error)
 		_log.Log(LOG_ERROR, "OnkyoAVTCP: %s", error.message().c_str());
 }
 
-bool OnkyoAVTCP::WriteToHardware(const char *pdata, const unsigned char length)
+bool OnkyoAVTCP::WriteToHardware(const char *pdata, const unsigned char /*length*/)
 {
-	if (!mIsConnected || !pdata)
+	if (!isConnected() || !pdata)
 	{
 		return false;
 	}
@@ -284,7 +246,7 @@ bool OnkyoAVTCP::WriteToHardware(const char *pdata, const unsigned char length)
 	std::string message = "";
 
 	if (packettype == pTypeGeneralSwitch) {
-		_tGeneralSwitch *xcmd = (_tGeneralSwitch*)pdata;
+		const _tGeneralSwitch *xcmd = reinterpret_cast<const _tGeneralSwitch*>(pdata);
 		int ID = xcmd->id;
 		int level = xcmd->level;
 		char buf[9];
@@ -333,7 +295,7 @@ bool OnkyoAVTCP::WriteToHardware(const char *pdata, const unsigned char length)
 
 bool OnkyoAVTCP::SendPacket(const char *pdata)
 {
-	if (!mIsConnected || !pdata)
+	if (!isConnected() || !pdata)
 	{
 		return false;
 	}
@@ -447,8 +409,8 @@ void OnkyoAVTCP::ReceiveSwitchMsg(const char *pData, int Len, bool muting, int I
 	gswitch.subtype = switch_types[ID].subtype;
 	gswitch.id = ID;
 	gswitch.unitcode = 0;
-	gswitch.cmnd = action;
-	gswitch.level = level;
+	gswitch.cmnd = (uint8_t)action;
+	gswitch.level = (uint8_t)level;
 	gswitch.battery_level = 255;
 	gswitch.rssi = 12;
 	gswitch.seqnbr = 0;
@@ -461,7 +423,7 @@ void OnkyoAVTCP::EnsureSwitchDevice(int ID, const char *options)
 	std::vector<std::vector<std::string> > result;
 	std::string options_str;
 	result = m_sql.safe_query("SELECT ID FROM DeviceStatus WHERE (HardwareID==%d) AND (DeviceID=='%08X')", m_HwdID, ID);
-	if (result.size() == 0) {
+	if (result.empty()) {
 		if (!options && switch_types[ID].options) {
 			options_str = m_sql.FormatDeviceOptions(m_sql.BuildDeviceOptions(switch_types[ID].options, false));
 			options = options_str.c_str();
@@ -479,8 +441,6 @@ void OnkyoAVTCP::EnsureSwitchDevice(int ID, const char *options)
 std::string OnkyoAVTCP::BuildSelectorOptions(const std::string & names, const std::string & ids)
 {
 	std::map<std::string, std::string> optionsMap;
-
-	std::vector<std::string>::iterator n_itt, id_itt;
 	optionsMap.insert(std::pair<std::string, std::string>("LevelOffHidden", "true"));
 	optionsMap.insert(std::pair<std::string, std::string>("SelectorStyle", "1"));
 	optionsMap.insert(std::pair<std::string, std::string>("LevelNames", names));
@@ -676,6 +636,10 @@ void OnkyoAVTCP::ParseData(const unsigned char *pData, int Len)
 	m_pPartialPkt = new_partial;
 }
 
+bool OnkyoAVTCP::CustomCommand(const uint64_t /*idx*/, const std::string &sCommand)
+{
+	return SendPacket(sCommand.c_str());
+}
 
 //Webserver helpers
 namespace http {
@@ -692,7 +656,7 @@ namespace http {
 			std::string sAction = request::findValue(&req, "action");
 			if (sIdx.empty())
 				return;
-			int idx = atoi(sIdx.c_str());
+			//int idx = atoi(sIdx.c_str());
 
 			std::vector<std::vector<std::string> > result;
 			result = m_sql.safe_query("SELECT DS.SwitchType, DS.DeviceID, H.Type, H.ID FROM DeviceStatus DS, Hardware H WHERE (DS.ID=='%q') AND (DS.HardwareID == H.ID)", sIdx.c_str());
